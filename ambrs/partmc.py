@@ -636,7 +636,7 @@ timestep and ensemble index, given the directory in which it resides"""
     ncfiles = [f for f in os.listdir(output_dir) if f.startswith(full_prefix) and f.endswith('.nc')]
     
     if len(ncfiles) == 0:
-        raise OSError(f'No NetCDF output found for ensemble number {repeat_num} in {dir}!')
+        raise OSError(f'No NetCDF output found for ensemble number {repeat_num} in {output_dir}!')
     if timestep == -1: # return the most recent output file
         ncfiles.sort()
         return ncfiles[-1]
@@ -645,4 +645,4 @@ timestep and ensemble index, given the directory in which it resides"""
         if ncfilename in ncfiles:
             return ncfilename
         else:
-            raise OSError(f'No NetCDF output found for repeat number {repeat_num} and timestep {timestep} in {dir}!')
+            raise OSError(f'No NetCDF output found for repeat number {repeat_num} and timestep {timestep} in {output_dir}!')

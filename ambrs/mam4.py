@@ -327,8 +327,8 @@ working directory contains any needed input files."""
 def get_mam_input(
         varname,
         mam_input='../mam_refactor-main/standalone/tests/smoke_test.nl'):
-    f_input = open(mam_input,'r')
-    input_lines = f_input.readlines()
+    with open(mam_input,'r') as f_input:
+        input_lines = f_input.readlines()
     yep = 0
     for oneline in input_lines:
         if varname in oneline:
@@ -405,15 +405,16 @@ def retrieve_model_state(
             'units':'kg_per_kg'}
         gas_mixture = build_gas_mixture(gas_cfg)
         
-        thermodynamics = { 
+        thermodynamics = {
             'T':scenario.temperature,
-            'p':scenario.temperature,
+            'p':scenario.pressure,
             'RH':scenario.relative_humidity}
-        
+
     else:
         output_filename = ensemble_output_dir + '/' + scenario_name + '/mam_output.nc'
-        currnc = Dataset(output_filename)
         timestep = timestep - 2
+        with Dataset(output_filename) as currnc:
+            h2so4_gas = currnc.variables['h2so4_gas'][timestep]
         mam4_population_cfg = {
             'type':'mam4',
             'mam4_dir': ensemble_output_dir + '/' + scenario_name + '/',
@@ -427,15 +428,15 @@ def retrieve_model_state(
             'p':scenario.pressure}
         
         particle_population = build_population(mam4_population_cfg)
-        gas_cfg = {'H2SO4':currnc.variables['h2so4_gas'][timestep]}        
+        gas_cfg = {'H2SO4':h2so4_gas}
         # gas_cfg = {'SO2':currnc.variables['so2_gas'][timestep]}
         # gas_cfg = {'SOAG':currnc.variables['soa_gas'][timestep]}
         gas_cfg['units'] = 'kg_per_kg' # todo: double-check
         gas_mixture = build_gas_mixture(gas_cfg)
-        
-        thermodynamics = { 
+
+        thermodynamics = {
             'T':scenario.temperature,
-            'p':scenario.temperature,
+            'p':scenario.pressure,
             'RH':scenario.relative_humidity}
         
     # fixme: update model state
