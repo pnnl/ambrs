@@ -6,12 +6,28 @@ optional tomas_jax dependency is not installed.
 
 import math
 import unittest
+import warnings
+from math import log10
 
 import numpy as np
+import scipy.stats
 
+import ambrs.aerosol as aerosol
+import ambrs.gas as gas
+import ambrs.ppe as ppe
 import ambrs.tomas_jax as tomas_jax
 
 _HAVE_TOMAS = tomas_jax._TOMAS_AVAILABLE
+
+# aerosol/gas species fixtures (names must be valid AMBRS species)
+so4 = aerosol.AerosolSpecies(name='SO4', molar_mass=97.071, density=1770,
+                             hygroscopicity=0.507)
+oc = aerosol.AerosolSpecies(name='OC', molar_mass=12.01, density=1000,
+                            hygroscopicity=0.1)
+bc = aerosol.AerosolSpecies(name='BC', molar_mass=12.01, density=1800,
+                            hygroscopicity=0.0)
+so2 = gas.GasSpecies(name='SO2', molar_mass=64.07)
+h2so4 = gas.GasSpecies(name='H2SO4', molar_mass=98.079)
 
 
 @unittest.skipUnless(_HAVE_TOMAS, 'tomas_jax not installed')
@@ -84,6 +100,106 @@ class TestLognormalBinning(unittest.TestCase):
             np.sum(Mk[:, SRTSO4]) / expected_total, 0.8, places=6)
         self.assertAlmostEqual(
             np.sum(Mk[:, SRTORG1]) / expected_total, 0.2, places=6)
+
+
+@unittest.skipUnless(_HAVE_TOMAS, 'tomas_jax not installed')
+class TestCreateInput(unittest.TestCase):
+    def setUp(self):
+        self.n = 8
+        self.spec = ppe.EnsembleSpecification(
+            name='tomas_ensemble',
+            aerosols=(so4, oc, bc),
+            gases=(so2, h2so4),
+            size=aerosol.AerosolModalSizeDistribution(
+                modes=[
+                    aerosol.AerosolModeDistribution(
+                        name='aitken',
+                        species=[so4],
+                        number=scipy.stats.loguniform(1e8, 1e9),
+                        geom_mean_diam=scipy.stats.loguniform(2e-8, 4e-8),
+                        log10_geom_std_dev=log10(1.6),
+                        mass_fractions=[scipy.stats.uniform(0, 1)],
+                    ),
+                    aerosol.AerosolModeDistribution(
+                        name='accumulation',
+                        species=[so4, oc, bc],
+                        number=scipy.stats.loguniform(1e8, 1e9),
+                        geom_mean_diam=scipy.stats.loguniform(8e-8, 1.5e-7),
+                        log10_geom_std_dev=log10(1.6),
+                        mass_fractions=[scipy.stats.uniform(0, 1),
+                                        scipy.stats.uniform(0, 1),
+                                        scipy.stats.uniform(0, 1)],
+                    ),
+                ],
+            ),
+            gas_concs=(scipy.stats.loguniform(1e6, 1e7) for _ in range(2)),
+            flux=scipy.stats.loguniform(1e-11, 1e-8),
+            relative_humidity=scipy.stats.uniform(0.1, 0.8),
+            temperature=scipy.stats.uniform(260, 300),
+            pressure=101325,
+            height=500,
+        )
+        self.ensemble = ppe.sample(self.spec, self.n)
+        self.processes = aerosol.AerosolProcesses(
+            coagulation=True, condensation=True, nucleation=True)
+
+    def _model(self):
+        return tomas_jax.AerosolModel(self.processes)
+
+    def test_create_input_shapes_and_fields(self):
+        from tomas_jax.core.config import ICOMP, N_GAS_SPECIES, SRTSO4
+        model = self._model()
+        scenario = self.ensemble.member(0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')  # BC lumping warning is expected
+            inp = model.create_input(scenario, dt=60.0, nstep=10)
+        nbins = len(inp.xk) - 1
+        self.assertEqual(inp.Nk.shape, (nbins,))
+        self.assertEqual(inp.Mk.shape, (nbins, ICOMP))
+        self.assertEqual(inp.Gc.shape, (N_GAS_SPECIES,))
+        self.assertEqual(inp.dt, 60.0)
+        self.assertEqual(inp.nstep, 10)
+        # processes emitted in canonical operator-split order
+        self.assertEqual(inp.processes, ('nucleation', 'coagulation', 'condensation'))
+        # H2SO4 gas placed into Gc
+        self.assertGreater(inp.Gc[SRTSO4], 0.0)
+        # BC has no TOMAS slot -> recorded as dropped/remapped
+        self.assertIn('BC', inp.dropped_species)
+        self.assertTrue(np.all(inp.Nk >= 0.0))
+
+    def test_number_and_mass_consistency(self):
+        model = self._model()
+        scenario = self.ensemble.member(0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            inp = model.create_input(scenario, dt=60.0, nstep=10)
+        total_number = sum(m.number for m in scenario.size.modes)
+        recovered = np.sum(inp.Nk) / model.boxvol
+        self.assertLess(abs(recovered - total_number) / total_number, 0.10)
+        # mass fractions sum to 1 per mode (ppe normalizes), so total aerosol
+        # mass equals sum(Nk * mean-bin-mass)
+        xk = inp.xk
+        m_mid = np.sqrt(xk[:-1] * xk[1:])
+        self.assertAlmostEqual(np.sum(inp.Mk) / np.sum(inp.Nk * m_mid), 1.0, places=5)
+
+    def test_create_inputs_over_ensemble(self):
+        model = self._model()
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            inputs = model.create_inputs(self.ensemble, dt=60.0, nstep=10)
+        self.assertEqual(len(inputs), self.n)
+        self.assertTrue(all(isinstance(i, tomas_jax.Input) for i in inputs))
+
+    def test_invalid_arguments(self):
+        model = self._model()
+        scenario = self.ensemble.member(0)
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore')
+            self.assertRaises(ValueError, model.create_input, scenario, 0.0, 10)
+            self.assertRaises(ValueError, model.create_input, scenario, 60.0, 0)
+            bad = self.ensemble.member(0)
+            bad.size = None
+            self.assertRaises(TypeError, model.create_input, bad, 60.0, 10)
 
 
 if __name__ == '__main__':

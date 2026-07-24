@@ -37,7 +37,7 @@ try:
         xk_boundaries,
         NBINS, ICOMP, N_GAS_SPECIES,
         SRTSO4, SRTSO2, SRTNH4, SRTH2O, SRTORG1, IORG,
-        MW_H2SO4, AVOGADRO, PI,
+        MW_H2SO4, MW_SO2, AVOGADRO, PI,
     )
     from tomas_jax.solvers.condensation import make_step
 
@@ -62,9 +62,25 @@ try:
         'SO2': SRTSO2,
     }
 
+    # Molar masses [g/mol] for converting gas number concentrations to the
+    # kg-per-grid-cell units TOMAS stores in Gc.
+    _GAS_MOLAR_MASS = {
+        'H2SO4': MW_H2SO4,
+        'SO2': MW_SO2,
+    }
+
     _TOMAS_AVAILABLE = True
 except ImportError:
     _TOMAS_AVAILABLE = False
+
+# TOMAS operator-split order; create_input emits its processes tuple in this order.
+_PROCESS_ORDER = ('so2_chemistry', 'nucleation', 'coagulation', 'condensation',
+                  'dilution')
+
+
+def _gas_conc_to_kg_per_cell(conc_molec_cm3, boxvol, molar_mass_g_mol):
+    """Convert a gas number concentration [molec cm^-3] to [kg per grid cell]."""
+    return conc_molec_cm3 * boxvol * (molar_mass_g_mol / 1000.0) / AVOGADRO
 
 # AMBRS aerosol species with no TOMAS-JAX analog. Their mass is lumped into the
 # organic slot so total aerosol mass is conserved, with a warning (the speciation
@@ -206,18 +222,119 @@ has no executable to invoke, so create_input()/run() are used directly.
 """
 
     def __init__(self,
-                 processes: AerosolProcesses):
+                 processes: AerosolProcesses,
+                 boxvol: float = 1e6,
+                 alpha: float = 1.0,
+                 density: float = 1770.0,
+                 cond_method: str = 'ppm_jit',
+                 nucl_scheme: str = 'ricco_dunne',
+                 org_conc: float = 0.0,
+                 nh3_conc: float = 0.0,
+                 fion: float = 0.0,
+                 fn_scale: float = 1.0,
+                 h2so4_production: float = 0.0):
+        """Construct a TOMAS-JAX adapter.
+
+Parameters (beyond the AerosolProcesses flags):
+    * boxvol: grid-cell volume [cm^3] used to scale number/mass to per-cell units
+    * alpha: mass accommodation coefficient [-]
+    * density: particle density used to relate bin mass to diameter [kg m^-3]
+    * cond_method: TOMAS H2SO4 condensation solver ('ppm_jit','tfl_jit','ppm','tfl')
+    * nucl_scheme: nucleation scheme ('ricco_dunne' or 'zhao2024')
+    * org_conc, nh3_conc, fion, fn_scale: nucleation precursor inputs (molec cm^-3,
+      molec cm^-3, ion pairs cm^-3 s^-1, and a dimensionless rate scale). AMBRS's
+      Scenario does not carry these, so they default to model-level constants; a
+      Scenario NH3 gas concentration, if present, overrides nh3_conc.
+    * h2so4_production: H2SO4 gas produced each step [molec cm^-3 s^-1]
+"""
         if not _TOMAS_AVAILABLE:
             raise ImportError(
                 'tomas_jax is not installed; install it to use '
                 'ambrs.tomas_jax.AerosolModel (see requirements.txt).')
         BaseAerosolModel.__init__(self, 'tomas-jax', processes)
+        self.boxvol = boxvol
+        self.alpha = alpha
+        self.density = density
+        self.cond_method = cond_method
+        self.nucl_scheme = nucl_scheme
+        self.org_conc = org_conc
+        self.nh3_conc = nh3_conc
+        self.fion = fion
+        self.fn_scale = fn_scale
+        self.h2so4_production = h2so4_production
+
+    def _active_processes(self) -> tuple:
+        """The TOMAS process names implied by self.processes, in split order."""
+        active = {
+            'coagulation': self.processes.coagulation,
+            'condensation': self.processes.condensation,
+            'nucleation': self.processes.nucleation,
+        }
+        return tuple(p for p in _PROCESS_ORDER if active.get(p, False))
 
     def create_input(self,
                      scenario: Scenario,
                      dt: float,
                      nstep: int) -> Input:
-        raise NotImplementedError('tomas_jax.AerosolModel.create_input not yet implemented!')
+        """Convert an AMBRS scenario into a TOMAS-JAX Input.
+
+Each log-normal mode is integrated onto the standard TOMAS mass-doubling grid and
+its composition mapped onto TOMAS species indices; modes are summed. Gas number
+concentrations (assumed [molec cm^-3]) are placed into Gc.
+"""
+        if dt <= 0.0:
+            raise ValueError("dt must be positive")
+        if nstep <= 0:
+            raise ValueError("nstep must be positive")
+        if not isinstance(scenario.size, AerosolModalSizeState):
+            raise TypeError('Non-modal aerosol particle size state cannot be '
+                            'used to create tomas-jax input!')
+
+        xk = np.asarray(xk_boundaries(), dtype=float)
+        nbins = len(xk) - 1
+        Nk = np.zeros(nbins)
+        Mk = np.zeros((nbins, ICOMP))
+        dropped = set()
+        for mode in scenario.size.modes:
+            species_names = tuple(s.name for s in mode.species)
+            frac_by_index, remapped = map_species_fractions(
+                species_names, mode.mass_fractions)
+            dropped.update(remapped)
+            mode_Nk = lognormal_to_bins(
+                xk, mode.number, mode.geom_mean_diam, mode.log10_geom_std_dev,
+                self.boxvol, self.density)
+            Nk += mode_Nk
+            Mk += distribute_mass(mode_Nk, xk, frac_by_index)
+
+        # gas phase: map known gases into Gc; let a Scenario NH3 override nh3_conc
+        Gc = np.zeros(N_GAS_SPECIES)
+        nh3_conc = self.nh3_conc
+        for gas, conc in zip(scenario.gases, scenario.gas_concs):
+            idx = GAS_SPECIES_MAP.get(gas.name)
+            if idx is not None:
+                Gc[idx] += _gas_conc_to_kg_per_cell(
+                    conc, self.boxvol, _GAS_MOLAR_MASS[gas.name])
+            elif gas.name == 'NH3':
+                nh3_conc = conc
+
+        return Input(
+            Nk=Nk, Mk=Mk, Gc=Gc, xk=xk,
+            temp=scenario.temperature,
+            pres=scenario.pressure,
+            rh=scenario.relative_humidity,
+            boxvol=self.boxvol,
+            alpha=self.alpha,
+            dt=dt,
+            nstep=nstep,
+            processes=self._active_processes(),
+            org_conc=self.org_conc,
+            nh3_conc=nh3_conc,
+            fion=self.fion,
+            fn_scale=self.fn_scale,
+            h2so4_production=self.h2so4_production,
+            aerosols=tuple(scenario.aerosols),
+            dropped_species=tuple(sorted(dropped)),
+        )
 
     def run(self, input) -> Output:
         raise NotImplementedError('tomas_jax.AerosolModel.run not yet implemented!')
