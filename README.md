@@ -22,12 +22,16 @@ All of the box models supported by AMBRS are forked under the [AMBRS-Project](ht
 AMBRS provides a [CMake](https://cmake.org/)-based [automated tool](https://github.com/AMBRS-project/ambuilder)
 for configuring and building each of these aerosol models and their dependencies.
 
+PartMC and MAM4 are compiled executables that must be built before `ambrs` can
+run them. See **[EXECUTABLES.md](EXECUTABLES.md)** for how to build them and how
+to drive them from `ambrs` with `PoolRunner`.
+
 ## System Requirements
 
 To use the `ambrs` Python module, you need
 
 * Python 3.12 or greater
-* A working set of aerosol models, built using [ambuilder](https://github.com/AMBRS-project/ambuilder) (or whatever method you prefer)
+* A working set of aerosol models, built using [ambuilder](https://github.com/AMBRS-project/ambuilder) (or whatever method you prefer) — see [EXECUTABLES.md](EXECUTABLES.md)
 
 We recommend using the `ambrs` framework inside its own [Python virtual environment](https://docs.python.org/3/library/venv.html). You can install its dependencies within a virtual
 environment by running
