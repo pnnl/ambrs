@@ -250,5 +250,49 @@ class TestRun(unittest.TestCase):
         self.assertEqual(len(model._step_cache), 1)  # one compiled step reused
 
 
+@unittest.skipUnless(_HAVE_TOMAS, 'tomas_jax not installed')
+class TestDirectRunner(unittest.TestCase):
+    def test_runs_ensemble_in_process(self):
+        import ambrs.ppe as ppe
+        import scipy.stats
+        from PyParticle import ParticlePopulation
+        from ambrs.runners import DirectRunner
+        spec = ppe.EnsembleSpecification(
+            name='tomas',
+            aerosols=(so4,),
+            gases=(h2so4,),
+            size=aerosol.AerosolModalSizeDistribution(
+                modes=[aerosol.AerosolModeDistribution(
+                    name='aitken', species=[so4],
+                    number=scipy.stats.loguniform(1e8, 1e9),
+                    geom_mean_diam=scipy.stats.loguniform(3e-8, 8e-8),
+                    log10_geom_std_dev=log10(1.6),
+                    mass_fractions=[scipy.stats.uniform(0, 1)])]),
+            gas_concs=(scipy.stats.loguniform(1e6, 1e7) for _ in range(1)),
+            flux=scipy.stats.loguniform(1e-11, 1e-8),
+            relative_humidity=scipy.stats.uniform(0.1, 0.8),
+            temperature=scipy.stats.uniform(260, 300),
+            pressure=101325, height=500)
+        ensemble = ppe.sample(spec, 4)
+        model = tomas_jax.AerosolModel(
+            aerosol.AerosolProcesses(coagulation=True, condensation=True))
+        inputs = model.create_inputs(ensemble, dt=60.0, nstep=3)
+        outputs = DirectRunner(model).run(inputs)
+        self.assertEqual(len(outputs), 4)
+        for out in outputs:
+            self.assertIsInstance(out.particle_population, ParticlePopulation)
+            self.assertGreater(out.particle_population.get_Ntot(), 0.0)
+        # scenarios named by 1-based index
+        self.assertEqual([o.scenario_name for o in outputs], ['1', '2', '3', '4'])
+        # one compiled step reused across the ensemble
+        self.assertEqual(len(model._step_cache), 1)
+
+    def test_empty_and_type_validation(self):
+        from ambrs.runners import DirectRunner
+        model = tomas_jax.AerosolModel(aerosol.AerosolProcesses(coagulation=True))
+        self.assertEqual(DirectRunner(model).run([]), [])
+        self.assertRaises(TypeError, DirectRunner(model).run, 'not-a-list')
+
+
 if __name__ == '__main__':
     unittest.main()

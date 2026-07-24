@@ -127,3 +127,44 @@ runner's root directory, generating a directory for each of the scenarios"""
         #     output = self.model.read_output_files(input, args[i]['dir'], scenario_name)
         #     outputs.append(output)
         # return outputs
+
+
+class DirectRunner:
+    """DirectRunner: runs scenarios *in process* by calling model.run() directly,
+rather than shelling out to an executable like PoolRunner.
+
+This is the runner for in-process models such as tomas-jax (a Python/JAX library
+with no command-line interface). Scenarios are run sequentially so that a single
+JIT-compiled step is reused across them; run() returns the list of Outputs.
+
+Required parameters:
+    * model: an in-process AMBRS aerosol model (one that overrides run())
+Optional parameters:
+    * scenario_name: a formatting string naming each scenario, containing an
+                     {index} field replaced with the 1-based index (default:
+                     '{index}')
+    """
+    def __init__(self, model,
+                 scenario_name: str = '{index}'):
+        self.model = model
+        self.scenario_name = scenario_name
+
+    def run(self, inputs: list[Any]) -> list[analysis.Output]:
+        """runner.run(inputs) -> list of Outputs, one per input, produced by
+running each scenario in process."""
+        if not isinstance(inputs, list):
+            raise TypeError('inputs must be a list of scenario inputs')
+        num_inputs = len(inputs)
+        if num_inputs == 0:
+            return []
+
+        max_num_digits = math.floor(math.log10(num_inputs)) + 1
+        logger.info(f'{self.model.name}: running {num_inputs} inputs in process')
+        outputs = []
+        for i, input in enumerate(inputs):
+            num_digits = math.floor(math.log10(i + 1)) + 1
+            formatted_index = '0' * (max_num_digits - num_digits) + f'{i+1}'
+            scenario_name = self.scenario_name.format(index=formatted_index)
+            outputs.append(self.model.run(input, scenario_name=scenario_name))
+        logger.info(f'{self.model.name}: completed runs.')
+        return outputs
