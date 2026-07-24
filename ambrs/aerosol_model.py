@@ -74,6 +74,19 @@ input dataclasses for each individual scenario."""
             inputs.append(self.create_input(scenario, dt, nstep))
         return inputs
 
+    def run(self, input, scenario_name: str = ''):
+        """ambrs.BaseAerosolModel.run(input, scenario_name) -> ambrs.analysis.Output
+
+Override this method for models that run *in process* (e.g. a Python/JAX library)
+rather than as an external executable driven by ambrs.runners.PoolRunner. Such
+models are driven by ambrs.runners.DirectRunner, which calls run() directly
+instead of write_input_files/invocation/read_output_files.
+
+Parameters:
+    * input: an instance of the model's input dataclass (from create_input)
+    * scenario_name: a name identifying this scenario, used in the Output"""
+        raise NotImplementedError('BaseAerosolModel.run not overridden!')
+
     def invocation(self,
                    exe: str,
                    prefix: str) -> str:

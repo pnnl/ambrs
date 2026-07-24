@@ -3,3 +3,6 @@
 
 .DS_Store
 runs/
+demo_figures/
+venv/
+.venv/
