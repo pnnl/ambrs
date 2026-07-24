@@ -154,6 +154,67 @@ def initial_dNdlnD(scenario):
 
 
 # ---------------------------------------------------------------------------
+# 3b. figure 0: scenario specification table (what actually ran)
+# ---------------------------------------------------------------------------
+def _fmt_comp(mode):
+    return ' / '.join(f'{s.name} {float(f):.2f}'
+                      for s, f in zip(mode.species, mode.mass_fractions))
+
+
+def write_scenario_table(ensemble, path):
+    members = [ensemble.member(i) for i in range(len(ensemble))]
+    cols = ['parameter'] + [f's{i + 1}' for i in range(len(members))]
+
+    rows = [('Temperature [K]', [f'{s.temperature:.1f}' for s in members]),
+            ('Pressure [Pa]', [f'{s.pressure:g}' for s in members]),
+            ('Relative humidity [-]', [f'{s.relative_humidity:.2f}' for s in members]),
+            ('H2SO4 gas [kg/kg]', [f'{s.gas_concs[0]:.2e}' for s in members])]
+    mode_labels = ['Accumulation', 'Aitken', 'Coarse', 'Primary carbon']
+    for mi, label in enumerate(mode_labels):
+        rows.append((f'— {label} mode —', ['' for _ in members]))
+        rows.append(('   number [m$^{-3}$]',
+                     [f'{s.size.modes[mi].number:.2e}' for s in members]))
+        rows.append(('   geom. mean diam. [nm]',
+                     [f'{s.size.modes[mi].geom_mean_diam * 1e9:.1f}' for s in members]))
+        rows.append(('   geom. std dev [-]',
+                     [f'{10 ** s.size.modes[mi].log10_geom_std_dev:.2f}' for s in members]))
+        rows.append(('   composition (mass frac.)',
+                     [_fmt_comp(s.size.modes[mi]) for s in members]))
+
+    cell_text = [[label] + vals for label, vals in rows]
+    fig, ax = plt.subplots(figsize=(10, 0.42 * len(rows) + 1.0))
+    ax.axis('off')
+    tbl = ax.table(cellText=cell_text, colLabels=cols, loc='center',
+                   cellLoc='center')
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(9)
+    tbl.scale(1, 1.4)
+    n_cols = len(cols)
+    for (r, c), cell in tbl.get_celld().items():
+        if r == 0:                                   # header row
+            cell.set_facecolor('#40466e')
+            cell.set_text_props(color='white', fontweight='bold')
+        elif cell_text[r - 1][0].startswith('—'):  # mode section rows
+            cell.set_facecolor('#dfe3ee')
+            if c == 0:
+                cell.set_text_props(fontweight='bold')
+        elif r % 2 == 0:
+            cell.set_facecolor('#f5f6fa')
+        if c == 0:                                   # left-align the label column
+            cell.set_text_props(ha='left')
+            cell._loc = 'left'
+    ax.set_title('AMBRS cross-model demo — scenario specifications '
+                 f'(seed 12345; dt={DT:g} s, nstep={NSTEP})', fontsize=11,
+                 pad=12)
+    fig.tight_layout()
+    fig.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close(fig)
+
+
+f0 = os.path.join(OUT_DIR, 'scenario_specs.png')
+write_scenario_table(ensemble, f0)
+
+# ---------------------------------------------------------------------------
 # 4. figure 1: per-scenario size distributions
 # ---------------------------------------------------------------------------
 fig, axes = plt.subplots(N_SCENARIOS, 1, figsize=(7, 2.6 * N_SCENARIOS),
@@ -208,6 +269,7 @@ fig.savefig(f2, dpi=150)
 plt.close(fig)
 
 print('\nWrote:')
+print(' ', f0)
 print(' ', f1)
 print(' ', f2)
 
