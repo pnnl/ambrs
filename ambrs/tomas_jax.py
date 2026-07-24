@@ -212,6 +212,7 @@ timestepping, active processes, and precursor parameters needed to drive a run.
     # bookkeeping (not consumed by the solver)
     aerosols: tuple = field(default_factory=tuple)       # scenario aerosol species
     dropped_species: tuple = field(default_factory=tuple)  # species with no TOMAS slot
+    scenario: Any = None   # originating Scenario, used to build the Output
 
 
 class AerosolModel(BaseAerosolModel):
@@ -300,9 +301,10 @@ concentrations (assumed [molec cm^-3]) are placed into Gc.
             frac_by_index, remapped = map_species_fractions(
                 species_names, mode.mass_fractions)
             dropped.update(remapped)
+            # AMBRS mode.number is [# m^-3]; TOMAS bins number in [# cm^-3].
             mode_Nk = lognormal_to_bins(
-                xk, mode.number, mode.geom_mean_diam, mode.log10_geom_std_dev,
-                self.boxvol, self.density)
+                xk, mode.number * 1e-6, mode.geom_mean_diam,
+                mode.log10_geom_std_dev, self.boxvol, self.density)
             Nk += mode_Nk
             Mk += distribute_mass(mode_Nk, xk, frac_by_index)
 
@@ -334,10 +336,138 @@ concentrations (assumed [molec cm^-3]) are placed into Gc.
             h2so4_production=self.h2so4_production,
             aerosols=tuple(scenario.aerosols),
             dropped_species=tuple(sorted(dropped)),
+            scenario=scenario,
         )
 
-    def run(self, input) -> Output:
-        raise NotImplementedError('tomas_jax.AerosolModel.run not yet implemented!')
+    def _step_fn(self, processes):
+        """Build (once) and cache the compiled TOMAS step for a process set."""
+        if not hasattr(self, '_step_cache'):
+            self._step_cache = {}
+        key = (processes, self.cond_method, self.nucl_scheme)
+        if key not in self._step_cache:
+            self._step_cache[key] = make_step(
+                list(processes),
+                cond_method=self.cond_method,
+                nucl_scheme=self.nucl_scheme)
+        return self._step_cache[key]
+
+    def run(self, input, scenario_name: str = 'tomas') -> Output:
+        """Run TOMAS-JAX in process and return an ambrs.analysis.Output.
+
+Integrates the Input state for input.nstep steps (reusing one compiled step
+across calls), then builds a PyParticle ParticlePopulation from the final per-bin
+number/mass and a GasMixture from the final gas phase.
+"""
+        import jax.numpy as jnp
+
+        Nk = jnp.asarray(input.Nk)
+        Mk = jnp.asarray(input.Mk)
+        Gc = jnp.asarray(input.Gc)
+        xk = jnp.asarray(input.xk)
+
+        prod_kg = _gas_conc_to_kg_per_cell(
+            input.h2so4_production * input.dt, input.boxvol, MW_H2SO4)
+        nuc_kwargs = {}
+        if 'nucleation' in input.processes:
+            nuc_kwargs = dict(org_conc=input.org_conc, nh3_conc=input.nh3_conc,
+                              fion=input.fion, fn_scale=input.fn_scale)
+
+        step = self._step_fn(input.processes) if input.processes else None
+        for _ in range(input.nstep):
+            if input.h2so4_production:
+                Gc = Gc.at[SRTSO4].add(prod_kg)
+            if step is not None:
+                Nk, Mk, Gc = step(
+                    Nk, Mk, Gc, xk, input.temp, input.pres, input.boxvol,
+                    input.rh, input.alpha, input.dt, **nuc_kwargs)
+
+        particle_population = self._build_population(
+            np.asarray(Nk), np.asarray(Mk), np.asarray(xk), input.boxvol)
+        gas_mixture = self._build_gas_mixture(
+            np.asarray(Gc), input.temp, input.pres, input.boxvol)
+        thermodynamics = {'T': input.temp, 'p': input.pres, 'RH': input.rh}
+
+        return Output(
+            model_name=self.name,
+            scenario_name=scenario_name,
+            scenario=input.scenario,
+            timestep=input.nstep,
+            particle_population=particle_population,
+            gas_mixture=gas_mixture,
+            thermodynamics=thermodynamics,
+        )
+
+    def _build_population(self, Nk, Mk, xk, boxvol):
+        """Build a PyParticle ParticlePopulation from TOMAS per-bin state.
+
+One particle is created per non-empty bin: diameter from the bin-mean mass and
+particle density, composition from the bin's mass across TOMAS species (SO4, a
+lumped organic, NH4, H2O), and number concentration Nk/boxvol (same units as the
+scenario's mode number).
+"""
+        from PyParticle import ParticlePopulation, make_particle
+        from PyParticle.species.registry import get_species
+
+        # aggregate TOMAS species indices back to AMBRS dry-species names
+        # (H2O is not carried as a dry species; PyParticle adds water from RH)
+        candidate_names = ['SO4', 'OC', 'NH4']
+        masses = np.column_stack([
+            Mk[:, SRTSO4],
+            Mk[:, SRTORG1:SRTNH4].sum(axis=1),  # all organics -> OC proxy
+            Mk[:, SRTNH4],
+        ])
+        m_dry = masses.sum(axis=1)  # total dry mass per bin [kg per cell]
+
+        # TOMAS is two-moment: the mean single-particle mass in a bin is Mk/Nk,
+        # not the geometric bin-mean mass. Derive the diameter from Mk/Nk so
+        # total mass is preserved; fall back to the bin geometric mass for
+        # (near-)empty bins, which carry negligible number.
+        m_geom = np.sqrt(xk[:-1] * xk[1:])
+        with np.errstate(divide='ignore', invalid='ignore'):
+            mean_mass = np.where(Nk > 0.0, m_dry / Nk, 0.0)
+        mass_for_diam = np.where(mean_mass > 0.0, mean_mass, m_geom)
+        dp_mid = np.cbrt(mass_for_diam / self.density * 6.0 / np.pi)  # [m]
+
+        # Nk/boxvol is [# cm^-3]; report as [# m^-3] to match the scenario's
+        # mode number units and the other AMBRS models.
+        n_conc = (Nk / boxvol) * 1e6
+
+        totals = masses.sum(axis=0)
+        keep = [i for i in range(len(candidate_names)) if i == 0 or totals[i] > 0.0]
+        names = [candidate_names[i] for i in keep]
+        masses = masses[:, keep]
+
+        species_list = tuple(get_species(n, None) for n in names)
+        population = ParticlePopulation(
+            species=species_list, spec_masses=[], num_concs=[], ids=[],
+            species_modifications={})
+
+        part_id = 0
+        for k in range(len(dp_mid)):
+            if n_conc[k] <= 0.0:
+                continue
+            row = masses[k]
+            total = row.sum()
+            fracs = (row / total).tolist() if total > 0.0 \
+                else [1.0] + [0.0] * (len(names) - 1)  # empty bin -> nominal SO4
+            particle = make_particle(
+                dp_mid[k], species_list, list(fracs),
+                specdata_path=None, species_modifications={}, D_is_wet=False)
+            part_id += 1
+            population.set_particle(particle, part_id, float(n_conc[k]))
+        return population
+
+    def _build_gas_mixture(self, Gc, temp, pres, boxvol):
+        """Build a GasMixture (SO2/H2SO4 mole ratios) from TOMAS's Gc [kg/cell]."""
+        from .gas import build_gas_mixture
+        R = 8.314462618                       # J mol^-1 K^-1
+        boxvol_m3 = boxvol * 1e-6
+        n_air = pres * boxvol_m3 / (R * temp)  # mol of air in the cell
+        so2_ratio = (Gc[SRTSO2] / (MW_SO2 / 1000.0)) / n_air
+        h2so4_ratio = (Gc[SRTSO4] / (MW_H2SO4 / 1000.0)) / n_air
+        return build_gas_mixture(
+            {'SO2': float(so2_ratio), 'H2SO4': float(h2so4_ratio),
+             'units': 'ratio'})
 
     def write_input_files(self, input, dir, prefix) -> None:
         raise NotImplementedError('tomas_jax.AerosolModel.write_input_files not yet implemented!')
