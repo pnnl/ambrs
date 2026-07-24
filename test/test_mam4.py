@@ -26,8 +26,11 @@ pom = aerosol.AerosolSpecies(
     density = 1000,
     hygroscopicity = 0.5,
 )
+# SOA has no dedicated AMBRS species yet; ambrs.mam4 maps it via the 'MSA'
+# placeholder, so represent it as MSA here (distinct from POM's 'OC') so the
+# mode's mapped mass fractions are complete and sum to 1.
 soa = aerosol.AerosolSpecies(
-    name='OC',
+    name='MSA',
     molar_mass = 12.01,
     density = 1000,
     hygroscopicity = 0.5,

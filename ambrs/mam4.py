@@ -118,33 +118,45 @@ class AerosolMassFractions:
         POM: float
         BC: float
 
+    @staticmethod
+    def _mass_fraction(mode, species_name):
+        """mode.mass_fraction(species_name), or 0.0 if the species is absent from
+the mode. Not every MAM4 mode carries every mapped species (and SOA has no
+dedicated AMBRS species yet -- it is looked up as the placeholder 'MSA'), so a
+missing species simply contributes no mass rather than raising."""
+        try:
+            return mode.mass_fraction(species_name)
+        except ValueError:
+            return 0.0
+
     def __init__(self,
                  scenario: Scenario):
+        mf = self._mass_fraction
         self.accum = self.AccumMode(
-            SO4 = scenario.size.modes[0].mass_fraction('SO4'),
-            POM = scenario.size.modes[0].mass_fraction("OC"),
-            SOA = scenario.size.modes[0].mass_fraction('MSA'), # FIXME: using MSA as a placeholder for SOA
-            BC  = scenario.size.modes[0].mass_fraction("BC"),
-            DST = scenario.size.modes[0].mass_fraction("OIN"),
-            NCL = scenario.size.modes[0].mass_fraction("Na"), # FIXME: and "Cl"? Assuming 1:1 for now
+            SO4 = mf(scenario.size.modes[0], 'SO4'),
+            POM = mf(scenario.size.modes[0], "OC"),
+            SOA = mf(scenario.size.modes[0], 'MSA'), # FIXME: using MSA as a placeholder for SOA
+            BC  = mf(scenario.size.modes[0], "BC"),
+            DST = mf(scenario.size.modes[0], "OIN"),
+            NCL = mf(scenario.size.modes[0], "Na"), # FIXME: and "Cl"? Assuming 1:1 for now
         )
-        
+
         self.aitken = self.AitkenMode(
-            SO4 = scenario.size.modes[1].mass_fraction("SO4"),
-            SOA = scenario.size.modes[1].mass_fraction("MSA"), # FIXME: using MSA as a placeholder for SOA
-            NCL = scenario.size.modes[1].mass_fraction("Na"), # FIXME: assuming 1:1 with Cl for now
+            SO4 = mf(scenario.size.modes[1], "SO4"),
+            SOA = mf(scenario.size.modes[1], "MSA"), # FIXME: using MSA as a placeholder for SOA
+            NCL = mf(scenario.size.modes[1], "Na"), # FIXME: assuming 1:1 with Cl for now
         )
         self.coarse = self.CoarseMode(
-            DST = scenario.size.modes[2].mass_fraction("OIN"),
-            NCL = scenario.size.modes[2].mass_fraction("Na"), # FIXME: see above
-            SO4 = scenario.size.modes[2].mass_fraction("SO4"),
-            BC  = scenario.size.modes[2].mass_fraction("BC"),
-            POM = scenario.size.modes[2].mass_fraction("OC"),
-            SOA = scenario.size.modes[2].mass_fraction("MSA"), # FIXME: using MSA as a placeholder for SOA
+            DST = mf(scenario.size.modes[2], "OIN"),
+            NCL = mf(scenario.size.modes[2], "Na"), # FIXME: see above
+            SO4 = mf(scenario.size.modes[2], "SO4"),
+            BC  = mf(scenario.size.modes[2], "BC"),
+            POM = mf(scenario.size.modes[2], "OC"),
+            SOA = mf(scenario.size.modes[2], "MSA"), # FIXME: using MSA as a placeholder for SOA
         )
         self.pcarbon = self.PCarbonMode(
-            POM = scenario.size.modes[3].mass_fraction("OC"),
-            BC  = scenario.size.modes[3].mass_fraction("BC"),
+            POM = mf(scenario.size.modes[3], "OC"),
+            BC  = mf(scenario.size.modes[3], "BC"),
         )
         
 
