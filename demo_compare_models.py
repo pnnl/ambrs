@@ -9,9 +9,12 @@ MAM4-JAX), then produces comparison graphs you can show to others:
   2. demo_figures/bulk_summary.png       -- total number and dry-mass
      concentration per scenario, grouped by model.
 
-Only coagulation is enabled, so the comparison is a clean, reproducible test of
-the same initial condition evolving under each model's microphysics (gas-phase
-treatment, whose units differ between models, is not exercised).
+Coagulation and H2SO4 condensation are enabled. H2SO4 is prescribed per scenario
+(1e6, 1e7, 1e8, 1e9 molec/cm3). The two models take gas concentrations in
+different native units (TOMAS-JAX: molec/cm3; MAM4-JAX: kg/kg mixing ratio), so
+each scenario's single *physical* H2SO4 concentration is converted to the units
+each model expects before its input is built -- the comparison is thus at equal
+physical H2SO4.
 
 The executable models (PartMC, MAM4) are NOT run here: they need binaries built
 via ambuilder and are driven by ambrs.runners.PoolRunner (see the note at the
@@ -22,6 +25,7 @@ bottom of this file). Run from the repository root:
 Requires the optional in-process models (tomas_jax and/or mam4_jax) plus
 PyParticle. Any model that is not installed is skipped with a message.
 """
+import dataclasses
 import logging
 import os
 import warnings
@@ -100,10 +104,30 @@ N_SCENARIOS = 4
 DT, NSTEP = 60.0, 60             # one simulated hour
 ensemble = ambrs.sample(SPEC, N_SCENARIOS)
 
+# prescribed physical H2SO4 gas concentration per scenario [molec cm^-3]
+H2SO4_MOLEC_CM3 = [1e6, 1e7, 1e8, 1e9]
+assert len(H2SO4_MOLEC_CM3) == N_SCENARIOS
+
+_NA = 6.02214076e23              # Avogadro [1/mol]
+_R = 8.314462618                 # gas constant [J/mol/K]
+_MW_DRY_AIR = 28.966e-3          # [kg/mol]
+_M_H2SO4 = 98.079e-3             # [kg/mol]
+
+
+def h2so4_molec_cm3_to_kg_per_kg(n, temperature, pressure):
+    """H2SO4 [molec cm^-3] -> [kg gas / kg dry air] at the given T, p."""
+    rho_air = pressure * _MW_DRY_AIR / (_R * temperature)   # [kg m^-3]
+    mass_conc = n * 1e6 * (_M_H2SO4 / _NA)                   # [kg m^-3]
+    return mass_conc / rho_air
+
+
+# per-model native gas units for the shared physical H2SO4 concentration
+_GAS_IN_KG_PER_KG = {'MAM4-JAX': True, 'TOMAS-JAX': False}
+
 # ---------------------------------------------------------------------------
 # 2. build the available in-process models
 # ---------------------------------------------------------------------------
-processes = ambrs.AerosolProcesses(coagulation=True)   # gas units differ, so coag only
+processes = ambrs.AerosolProcesses(coagulation=True, condensation=True)
 models = {}
 if ambrs.mam4_jax._MAM4_JAX_AVAILABLE:
     models['MAM4-JAX'] = ambrs.mam4_jax.AerosolModel(processes)
@@ -115,14 +139,28 @@ if not models:
                      'mam4_jax). See TOMAS_JAX.md / MAM4_JAX.md.')
 print(f'Running {N_SCENARIOS} scenarios through: {", ".join(models)}')
 
-# run each model over the shared ensemble (warnings about approximate species
-# mapping are expected and silenced for a clean demo)
+
+def _inputs_for(name, model):
+    """Build this model's inputs, giving each scenario the prescribed physical
+H2SO4 in the units the model expects."""
+    inputs = []
+    for i in range(N_SCENARIOS):
+        sc = ensemble.member(i)
+        n = H2SO4_MOLEC_CM3[i]
+        conc = (h2so4_molec_cm3_to_kg_per_kg(n, sc.temperature, sc.pressure)
+                if _GAS_IN_KG_PER_KG[name] else n)
+        sc = dataclasses.replace(sc, gas_concs=(conc,))
+        inputs.append(model.create_input(sc, dt=DT, nstep=NSTEP))
+    return inputs
+
+
+# run each model (warnings about approximate species mapping are expected and
+# silenced for a clean demo)
 outputs = {}
 with warnings.catch_warnings():
     warnings.simplefilter('ignore')
     for name, model in models.items():
-        inputs = model.create_inputs(ensemble, dt=DT, nstep=NSTEP)
-        outputs[name] = ambrs.DirectRunner(model).run(inputs)
+        outputs[name] = ambrs.DirectRunner(model).run(_inputs_for(name, model))
 
 # ---------------------------------------------------------------------------
 # 3. helpers: dN/dlnD from a population, and the analytic initial lognormal
@@ -161,14 +199,15 @@ def _fmt_comp(mode):
                       for s, f in zip(mode.species, mode.mass_fractions))
 
 
-def write_scenario_table(ensemble, path):
+def write_scenario_table(ensemble, h2so4_molec_cm3, path):
     members = [ensemble.member(i) for i in range(len(ensemble))]
     cols = ['parameter'] + [f's{i + 1}' for i in range(len(members))]
 
     rows = [('Temperature [K]', [f'{s.temperature:.1f}' for s in members]),
             ('Pressure [Pa]', [f'{s.pressure:g}' for s in members]),
             ('Relative humidity [-]', [f'{s.relative_humidity:.2f}' for s in members]),
-            ('H2SO4 gas [kg/kg]', [f'{s.gas_concs[0]:.2e}' for s in members])]
+            ('H2SO4 gas [molec cm$^{-3}$]',
+             [f'{n:.0e}' for n in h2so4_molec_cm3])]
     mode_labels = ['Accumulation', 'Aitken', 'Coarse', 'Primary carbon']
     for mi, label in enumerate(mode_labels):
         rows.append((f'— {label} mode —', ['' for _ in members]))
@@ -212,7 +251,7 @@ def write_scenario_table(ensemble, path):
 
 
 f0 = os.path.join(OUT_DIR, 'scenario_specs.png')
-write_scenario_table(ensemble, f0)
+write_scenario_table(ensemble, H2SO4_MOLEC_CM3, f0)
 
 # ---------------------------------------------------------------------------
 # 4. figure 1: per-scenario size distributions
@@ -230,12 +269,14 @@ for i in range(N_SCENARIOS):
                 lw=2, label=f'{name} (1 h)', **MODEL_STYLE[name])
     ax.set_xscale('log')
     ax.set_ylabel(r'$dN/d\ln D$  [m$^{-3}$]')
-    ax.set_title(f'scenario {i + 1}', fontsize=10, loc='left')
+    ax.set_title(f'scenario {i + 1}  —  H$_2$SO$_4$ = {H2SO4_MOLEC_CM3[i]:.0e} molec cm$^{{-3}}$',
+                 fontsize=10, loc='left')
     ax.grid(True, which='both', alpha=0.2)
     if i == 0:
         ax.legend(frameon=False, fontsize=9)
 axes[-1].set_xlabel('dry diameter [nm]')
-fig.suptitle('Dry size distribution after 1 h of coagulation', fontsize=12)
+fig.suptitle('Dry size distribution after 1 h (coagulation + H$_2$SO$_4$ condensation)',
+             fontsize=12)
 fig.tight_layout(rect=(0, 0, 1, 0.99))
 f1 = os.path.join(OUT_DIR, 'size_distributions.png')
 fig.savefig(f1, dpi=150)
@@ -262,7 +303,8 @@ for ax, title, ylab in ((axN, 'Total number concentration', r'$N_{tot}$ [m$^{-3}
     ax.set_ylabel(ylab)
     ax.grid(True, axis='y', alpha=0.2)
     ax.legend(frameon=False, fontsize=9)
-fig.suptitle('Bulk aerosol metrics after 1 h (by model)', fontsize=12)
+fig.suptitle('Bulk aerosol metrics after 1 h, coag. + H$_2$SO$_4$ condensation (by model)',
+             fontsize=12)
 fig.tight_layout(rect=(0, 0, 1, 0.98))
 f2 = os.path.join(OUT_DIR, 'bulk_summary.png')
 fig.savefig(f2, dpi=150)
