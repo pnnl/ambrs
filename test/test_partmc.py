@@ -223,5 +223,28 @@ class TestPartMCInput(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(temp_dir.name, 'partmc.spec')))
         temp_dir.cleanup()
 
+    def test_create_input_retains_scenario(self):
+        # read_output_files needs the originating scenario to build an Output
+        scenario = self.ensemble.member(0)
+        model = partmc.AerosolModel(
+            processes = aerosol.AerosolProcesses(coagulation = True),
+            run_type = 'particle', n_part = 1000)
+        input = model.create_input(scenario, 4.0, 100)
+        self.assertIs(input.scenario, scenario)
+
+    def test_read_output_files_without_output_raises(self):
+        # with no PartMC output present, reading output fails cleanly rather
+        # than returning bogus data (FileNotFoundError is an OSError)
+        scenario = self.ensemble.member(0)
+        model = partmc.AerosolModel(
+            processes = aerosol.AerosolProcesses(coagulation = True),
+            run_type = 'particle', n_part = 1000)
+        input = model.create_input(scenario, 4.0, 100)
+        with tempfile.TemporaryDirectory() as root:
+            dir = os.path.join(root, '1')
+            os.mkdir(dir)
+            model.write_input_files(input, dir, '1') # creates dir/out, but no .nc
+            self.assertRaises(OSError, model.read_output_files, input, dir, '1')
+
 if __name__ == '__main__':
     unittest.main()
