@@ -326,5 +326,62 @@ class TestMAM4AerosolModel(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(temp_dir.name, 'namelist')))
         temp_dir.cleanup()
 
+class TestMAM4ModelState(unittest.TestCase):
+    """Tests for ambrs.mam4.retrieve_model_state"""
+
+    # MAM4 expects these species per mode (see AerosolMassFractions)
+    msa = aerosol.AerosolSpecies(name='MSA', molar_mass=96.11, density=1000,
+                                 hygroscopicity=0.5)
+
+    def _mode(self, name, species, gmd, gsd):
+        n = len(species)
+        return aerosol.AerosolModeState(
+            name = name,
+            species = tuple(species),
+            number = 1e9,
+            geom_mean_diam = gmd,
+            log10_geom_std_dev = log10(gsd),
+            mass_fractions = tuple([1.0 / n] * n),
+        )
+
+    def _scenario(self):
+        size = aerosol.AerosolModalSizeState(modes = (
+            self._mode('accumulation', [so4, pom, self.msa, bc, dst, ncl], 1e-7, 1.6),
+            self._mode('aitken', [so4, self.msa, ncl], 2e-8, 1.6),
+            self._mode('coarse', [dst, ncl, so4, bc, pom, self.msa], 1.5e-6, 1.8),
+            self._mode('primary carbon', [pom, bc], 5e-8, 1.8),
+        ))
+        return Scenario(
+            aerosols = (so4, pom, self.msa, bc, dst, ncl),
+            gases = (so2, h2so4),
+            size = size,
+            gas_concs = (1e-10, 1e-10),
+            flux = 0.0,
+            relative_humidity = 0.5,
+            temperature = 273.0,   # deliberately different from pressure so that
+            pressure = p0,         # confusing the two is detectable
+            height = h0,
+        )
+
+    def test_thermodynamics_reports_pressure_not_temperature(self):
+        scenario = self._scenario()
+        model = mam4.AerosolModel(aerosol.AerosolProcesses(coagulation = True))
+        input = model.create_input(scenario, 4.0, 10)
+        with tempfile.TemporaryDirectory() as root:
+            scenario_dir = os.path.join(root, 'scenario')
+            os.mkdir(scenario_dir)
+            model.write_input_files(input, scenario_dir, 'namelist')
+            output = mam4.retrieve_model_state(
+                scenario_name = 'scenario',
+                scenario = scenario,
+                timestep = 1, # initial conditions: read from the namelist, no NetCDF
+                ensemble_output_dir = root,
+                N_bins = 10,
+            )
+        self.assertAlmostEqual(output.thermodynamics['T'], scenario.temperature)
+        self.assertAlmostEqual(output.thermodynamics['p'], scenario.pressure)
+        self.assertAlmostEqual(output.thermodynamics['RH'], scenario.relative_humidity)
+
+
 if __name__ == '__main__':
     unittest.main()
