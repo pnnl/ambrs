@@ -5,9 +5,10 @@ from .ppe import EnsembleSpecification, Ensemble, ensemble_from_scenarios, \
                  sample, lhs, LinearParameterSweep, LogarithmicParameterSweep, \
                  AerosolModeParameterSweeps, AerosolModalSizeParameterSweeps, \
                  AerosolParameterSweeps, sweep
-from .runners import PoolRunner
+from .runners import PoolRunner, DirectRunner
 from .scenario import Scenario
 
 from . import mam4
 from . import mphys
 from . import partmc
+from . import tomas_jax
