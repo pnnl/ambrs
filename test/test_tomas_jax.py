@@ -294,5 +294,44 @@ class TestDirectRunner(unittest.TestCase):
         self.assertRaises(TypeError, DirectRunner(model).run, 'not-a-list')
 
 
+@unittest.skipUnless(_HAVE_TOMAS, 'tomas_jax not installed')
+class TestFilePersistence(unittest.TestCase):
+    def test_write_read_input_round_trip(self):
+        import os
+        import tempfile
+        model = tomas_jax.AerosolModel(
+            aerosol.AerosolProcesses(coagulation=True, condensation=True))
+        inp = model.create_input(_single_mode_scenario(number=1e10, h2so4_conc=1e7),
+                                 dt=60.0, nstep=7)
+        with tempfile.TemporaryDirectory() as d:
+            model.write_input_files(inp, d, 'run0')
+            self.assertTrue(os.path.exists(os.path.join(d, 'run0.npz')))
+            self.assertTrue(os.path.exists(os.path.join(d, 'run0_params.txt')))
+            loaded = model.read_input(d, 'run0')
+        np.testing.assert_allclose(loaded.Nk, inp.Nk)
+        np.testing.assert_allclose(loaded.Mk, inp.Mk)
+        np.testing.assert_allclose(loaded.Gc, inp.Gc)
+        np.testing.assert_allclose(loaded.xk, inp.xk)
+        self.assertEqual(loaded.processes, inp.processes)
+        self.assertEqual(loaded.nstep, inp.nstep)
+        self.assertEqual(loaded.dt, inp.dt)
+
+    def test_read_output_files_runs_from_disk(self):
+        import tempfile
+        from PyParticle import ParticlePopulation
+        model = tomas_jax.AerosolModel(aerosol.AerosolProcesses(coagulation=True))
+        inp = model.create_input(_single_mode_scenario(number=1e10), dt=60.0, nstep=3)
+        with tempfile.TemporaryDirectory() as d:
+            model.write_input_files(inp, d, 'run0')
+            out = model.read_output_files(None, d, 'run0')  # input loaded from disk
+        self.assertIsInstance(out.particle_population, ParticlePopulation)
+        self.assertEqual(out.scenario_name, 'run0')
+
+    def test_invocation_is_not_supported(self):
+        model = tomas_jax.AerosolModel(aerosol.AerosolProcesses(coagulation=True))
+        from ambrs.aerosol_model import NotImplementedError as AmbrsNotImplemented
+        self.assertRaises(AmbrsNotImplemented, model.invocation, 'exe', 'p')
+
+
 if __name__ == '__main__':
     unittest.main()
