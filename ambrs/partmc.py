@@ -1,4 +1,4 @@
-"""ambrs.mam4 -- data types and functions related to the MAM4 box model"""
+"""ambrs.partmc -- data types and functions related to the PartMC box model"""
 
 from .aerosol import AerosolProcesses, AerosolModalSizePopulation, \
                      AerosolModalSizeState
@@ -144,6 +144,10 @@ class Input:
     aero_emissions: Optional[AerosolModeTimeSeries] = None  # aerosol emissions time series
     aero_background: Optional[AerosolModeTimeSeries] = None # aerosol background time series
 
+    # the originating Scenario, retained so read_output_files can build an Output
+    # (not written to the .spec file)
+    scenario: Optional[Scenario] = None
+
 class AerosolModel(BaseAerosolModel):
     def __init__(self,
                  processes: AerosolProcesses,
@@ -236,12 +240,51 @@ class AerosolModel(BaseAerosolModel):
             allow_halving = False,
             record_removals = True,
             do_parallel = False,
+
+            scenario = scenario,
         )
 
     def invocation(self,
                    exe: str,
                    prefix: str) -> str:
         return f'{exe} {prefix}.spec'
+
+    def read_output_files(self, input, dir: str, prefix: str) -> Output:
+        """ambrs.partmc.AerosolModel.read_output_files(input, dir, prefix) ->
+ambrs.analysis.Output describing the final state of the PartMC simulation that
+ran in `dir`.
+
+PartMC writes its NetCDF output to `<dir>/out/<prefix>_<repeat>_<step>.nc` (see
+write_input_files, which sets output_prefix = out/<prefix>). This delegates to
+retrieve_model_state with timestep=-1, which selects the most recent output file
+(i.e. the final state).
+
+`dir` must be the scenario's own directory and be named after `prefix`, because
+retrieve_model_state rebuilds the path as <ensemble_output_dir>/<scenario_name>.
+
+Raises OSError if no output file is found (e.g. the run failed), and ValueError if
+`dir` isn't named after `prefix`."""
+        # PartMC writes n_repeat repeats if set, else 1 (see write_input_files).
+        # NOTE: only the last repeat is read; averaging across repeats is not yet
+        # implemented, so a multi-repeat run reports repeat n_repeat alone.
+        repeat_num = input.n_repeat if input.n_repeat else 1
+        dir = os.path.normpath(dir) # a trailing separator would break dirname()
+        if os.path.basename(dir) != prefix:
+            raise ValueError(f"scenario directory '{dir}' must be named after its "
+                             f"prefix '{prefix}'")
+        ensemble_output_dir = os.path.dirname(dir)
+        # check for output up front: the population builder reports a missing
+        # output file with an opaque IndexError, so use our own helper (which
+        # raises OSError) to fail with a clear message instead
+        get_ncfile(prefix, -1, ensemble_output_dir = ensemble_output_dir,
+                   repeat_num = repeat_num)
+        return retrieve_model_state(
+            scenario_name = prefix,
+            scenario = input.scenario,
+            timestep = -1, # -1 selects the most recent output file
+            repeat_num = repeat_num,
+            ensemble_output_dir = ensemble_output_dir,
+        )
 
     def write_input_files(self,
                           input,

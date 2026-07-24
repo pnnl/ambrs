@@ -49,12 +49,20 @@ Optional parameters:
 
     def run(self, inputs: list[Any]) -> list[analysis.Output]:
         """runner.run(inputs) -> runs a list of scenario inputs within the
-runner's root directory, generating a directory for each of the scenarios"""
+runner's root directory, generating a directory for each of the scenarios, and
+returns the list of ambrs.analysis.Output objects read back from each scenario's
+output files (one per input, in the order the inputs were given).
+
+A scenario that failed to run, or whose output can't be read, contributes None in
+its position rather than discarding the rest of the ensemble; failures are logged.
+Callers that require complete results should check for None."""
         if not isinstance(inputs, list):
             raise TypeError('inputs must be a list of scenario inputs')
 
         # prep scenarios to run
         num_inputs = len(inputs)
+        if num_inputs == 0:
+            return []
         max_num_digits = math.floor(math.log10(num_inputs)) + 1
         logger.info(f'{self.model.name}: generating input for {num_inputs} scenarios...')
         found_dir = False
@@ -76,54 +84,79 @@ runner's root directory, generating a directory for each of the scenarios"""
             # write input files and define commands
             self.model.write_input_files(input, dir, scenario_name)
             command = self.model.invocation(self.executable, scenario_name)
-            dir = os.path.join(self.root, scenario_name)
             args.append({
                 'command': command,
-                'dir': dir
+                'dir': dir,
+                'scenario_name': scenario_name, # retained for reading output below
             })
         if found_dir:
             logger.warning(f'{self.model.name}: one or more existing scenario directories found. Overwriting contents...')
         logger.info(f'{self.model.name}: finished generating scenario input.')
-        
+
         # now run scenarios in parallel
         pool = multiprocessing.dummy.Pool(self.num_processes)
         logger.info(f'{self.model.name}: running {num_inputs} inputs ({self.num_processes} parallel processes)')
-        
+
         error_occurred = False
-        
+
         # this function is called with a list of completed processes by pool.map_async
         def callback(completed_processes) -> None:
-            if not all([p.returncode == 0 for p in completed_processes]):
+            nonlocal error_occurred # otherwise the assignment below is local-only
+            # a scenario that couldn't be launched at all is reported as None
+            if not all([p is not None and p.returncode == 0
+                        for p in completed_processes]):
                 error_occurred = True
 
         # this function is called with one of a mapped set of arguments by pool.map_async
         def run_scenario(args) -> subprocess.CompletedProcess:
-            f_stdout = open(os.path.join(args['dir'], 'stdout.log'), 'w')
-            f_stderr = open(os.path.join(args['dir'], 'stderr.log'), 'w')
-            f_timer = open(os.path.join(args['dir'], 'timer.log'), 'w')
-            start_time = timeit.default_timer()
-            subprocess_output = subprocess.run(args['command'].split(),
-                close_fds = True,
-                cwd = args['dir'],
-                stdout = f_stdout,
-                stderr = f_stderr,
-            )
-            stop_time = timeit.default_timer()
-            elapsed_time = stop_time - start_time
-            f_timer.write(str(elapsed_time))
-            return subprocess_output
-        
+            try:
+                with open(os.path.join(args['dir'], 'stdout.log'), 'w') as f_stdout, \
+                     open(os.path.join(args['dir'], 'stderr.log'), 'w') as f_stderr, \
+                     open(os.path.join(args['dir'], 'timer.log'), 'w') as f_timer:
+                    start_time = timeit.default_timer()
+                    subprocess_output = subprocess.run(args['command'].split(),
+                        close_fds = True,
+                        cwd = args['dir'],
+                        stdout = f_stdout,
+                        stderr = f_stderr,
+                    )
+                    stop_time = timeit.default_timer()
+                    elapsed_time = stop_time - start_time
+                    f_timer.write(str(elapsed_time))
+                return subprocess_output
+            except Exception as e:
+                # subprocess.run raises rather than returning a non-zero code when
+                # the executable itself is missing or not runnable. Report it here:
+                # an exception raised in a worker is otherwise stored on the async
+                # result and silently discarded.
+                logger.error(f'{self.model.name}: scenario '
+                             f'{args["scenario_name"]} failed to run: {e}')
+                return None
+
         results = pool.map_async(run_scenario, args, callback = callback)
-        results.wait()
-        
+        try:
+            results.get() # not wait(): get() re-raises anything the workers missed
+        except Exception as e:
+            error_occurred = True
+            logger.error(f'{self.model.name}: error while running scenarios: {e}')
+        finally:
+            pool.close() # otherwise the pool's threads are leaked
+            pool.join()
+
         logger.info(f'{self.model.name}: completed runs.')
         if error_occurred:
-            logger.error('f{self.model.name}: At least one run failed.')
-        
-        # gather model output
-        # outputs = []
-        # for i, input in enumerate(inputs):
-        #     scenario_name = self.scenario_name.format(index = formatted_index)
-        #     output = self.model.read_output_files(input, args[i]['dir'], scenario_name)
-        #     outputs.append(output)
-        # return outputs
+            logger.error(f'{self.model.name}: At least one run failed.')
+
+        # gather model output, using each scenario's own name/directory. A scenario
+        # whose output is missing or unreadable yields None rather than discarding
+        # the results of every other scenario in the ensemble.
+        outputs = []
+        for input, arg in zip(inputs, args):
+            try:
+                outputs.append(self.model.read_output_files(
+                    input, arg['dir'], arg['scenario_name']))
+            except Exception as e:
+                logger.error(f'{self.model.name}: could not read output for '
+                             f'scenario {arg["scenario_name"]}: {e}')
+                outputs.append(None)
+        return outputs

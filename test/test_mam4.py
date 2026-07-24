@@ -326,5 +326,61 @@ class TestMAM4AerosolModel(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(temp_dir.name, 'namelist')))
         temp_dir.cleanup()
 
+
+# MAM4 maps SOA via the placeholder 'MSA' species (see ambrs.mam4), so a scenario
+# used with create_input needs every mapped species present in each mode.
+msa = aerosol.AerosolSpecies(
+    name='MSA',
+    molar_mass = 96.11,
+    density = 1000,
+    hygroscopicity = 0.5,
+)
+
+def _four_mode_scenario():
+    """A 4-mode scenario carrying every species ambrs.mam4 maps, in MAM4's mode
+order (accumulation, aitken, coarse, primary carbon)."""
+    species = (so4, pom, msa, bc, dst, ncl)
+    fracs = tuple(1.0 / len(species) for _ in species)
+    modes = tuple(
+        aerosol.AerosolModeState(
+            name = name, species = species, number = number,
+            geom_mean_diam = gmd, log10_geom_std_dev = log10(gsd),
+            mass_fractions = fracs)
+        for name, number, gmd, gsd in (
+            ('accumulation', 1e8, 1.1e-7, 1.8),
+            ('aitken', 1e9, 2.6e-8, 1.6),
+            ('coarse', 1e5, 2.0e-6, 1.8),
+            ('primary carbon', 2e8, 5.0e-8, 1.6),
+        ))
+    return Scenario(
+        aerosols = species, gases = (so2, h2so4),
+        size = aerosol.AerosolModalSizeState(modes = modes),
+        gas_concs = (1e-9, 1e-13), flux = 0.0, relative_humidity = 0.5,
+        temperature = 273.0, pressure = p0, height = h0)
+
+
+class TestMAM4Output(unittest.TestCase):
+    """Unit tests for ambrs.mam4.AerosolModel output handling"""
+
+    def setUp(self):
+        self.model = mam4.AerosolModel(
+            aerosol.AerosolProcesses(coagulation = True))
+        self.input = self.model.create_input(_four_mode_scenario(), 4.0, 100)
+
+    def test_create_input_retains_scenario(self):
+        # read_output_files needs the originating scenario to build an Output
+        self.assertIsNotNone(self.input.scenario)
+        self.assertEqual(len(self.input.scenario.size.modes), 4)
+
+    def test_read_output_files_without_output_raises(self):
+        # with no mam_output.nc present, reading output fails cleanly rather
+        # than returning bogus data
+        with tempfile.TemporaryDirectory() as root:
+            dir = os.path.join(root, '1')
+            os.mkdir(dir)
+            self.model.write_input_files(self.input, dir, '1')
+            self.assertRaises(
+                OSError, self.model.read_output_files, self.input, dir, '1')
+
 if __name__ == '__main__':
     unittest.main()
