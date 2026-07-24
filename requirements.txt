@@ -23,3 +23,7 @@ tzdata==2024.1
 # TOMAS-JAX box model (optional; private repo). Pulls in jax/jaxlib/diffrax.
 # Installing this requires SSH access to the repository (e.g. a deploy key in CI).
 tomas-jax @ git+ssh://git@github.com/reflective-org/tomas-jax.git@dev
+
+# MAM4-JAX box model (optional; public repo). Pulls in jax/jaxlib/diffrax.
+# import ambrs never requires it; the adapter is guarded (_MAM4_JAX_AVAILABLE).
+mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@main

@@ -9,6 +9,7 @@ from .runners import PoolRunner, DirectRunner
 from .scenario import Scenario
 
 from . import mam4
+from . import mam4_jax
 from . import mphys
 from . import partmc
 from . import tomas_jax
